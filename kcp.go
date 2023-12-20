@@ -572,6 +572,12 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 		data = ikcp_decode32u(data, &sn)
 		data = ikcp_decode32u(data, &una)
 		data = ikcp_decode32u(data, &length)
+		if len(data) >= 4 {
+			var unk uint32
+			if ikcp_decode32u(data, &unk); unk == 0 {
+				data = data[4:]
+			}
+		}
 		if len(data) < int(length) {
 			return -2
 		}
