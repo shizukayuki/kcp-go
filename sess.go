@@ -531,7 +531,7 @@ func (s *UDPSession) output(buf []byte) {
 
 	// 1. FEC encoding
 	if s.fecEncoder != nil {
-		ecc = s.fecEncoder.encode(buf)
+		ecc = s.fecEncoder.encode(buf, s.kcp.rx_rto)
 	}
 
 	// 2&3. crc32 & encryption
