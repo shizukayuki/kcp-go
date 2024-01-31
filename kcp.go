@@ -168,6 +168,7 @@ type KCP struct {
 	buffer   []byte
 	reserved int
 	output   output_callback
+	skip     bool
 }
 
 type ackItem struct {
@@ -572,11 +573,9 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 		data = ikcp_decode32u(data, &sn)
 		data = ikcp_decode32u(data, &una)
 		data = ikcp_decode32u(data, &length)
-		if len(data) >= 4 {
+		if kcp.skip {
 			var unk uint32
-			if ikcp_decode32u(data, &unk); unk == 0 {
-				data = data[4:]
-			}
+			data = ikcp_decode32u(data, &unk)
 		}
 		if len(data) < int(length) {
 			return -2
@@ -1053,6 +1052,10 @@ func (kcp *KCP) NoDelay(nodelay, interval, resend, nc int) int {
 		kcp.nocwnd = int32(nc)
 	}
 	return 0
+}
+
+func (kcp *KCP) Skip(v bool) {
+	kcp.skip = v
 }
 
 // WndSize sets maximum window size: sndwnd=32, rcvwnd=32 by default
