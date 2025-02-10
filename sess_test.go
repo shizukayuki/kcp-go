@@ -1,6 +1,30 @@
+// The MIT License (MIT)
+//
+// Copyright (c) 2015 xtaci
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
 package kcp
 
 import (
+	"bytes"
+	"crypto/rand"
 	"crypto/sha1"
 	"fmt"
 	"io"
@@ -13,6 +37,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkg/errors"
 	"golang.org/x/crypto/pbkdf2"
 )
 
@@ -94,7 +119,7 @@ func listenEcho(port int) (net.Listener, error) {
 	//block, _ := NewTEABlockCrypt(pass[:16])
 	//block, _ := NewAESBlockCrypt(pass)
 	block, _ := NewSalsa20BlockCrypt(pass)
-	return ListenWithOptions(fmt.Sprintf("127.0.0.1:%v", port), block, 10, 0)
+	return ListenWithOptions(fmt.Sprintf("127.0.0.1:%v", port), block, 10, 1)
 }
 func listenTinyBufferEcho(port int) (net.Listener, error) {
 	//block, _ := NewNoneBlockCrypt(pass)
@@ -640,4 +665,133 @@ func TestUDPSessionNonOwnedPacketConn(t *testing.T) {
 	if pconn.Closed {
 		t.Fatal("non-owned PacketConn closed after UDPSession.Close()")
 	}
+}
+
+// this function test the data correctness with FEC and encryption enabled
+func TestReliability(t *testing.T) {
+	port := int(atomic.AddUint32(&baseport, 1))
+	l := echoServer(port)
+	defer l.Close()
+
+	cli, err := dialEcho(port)
+	if err != nil {
+		panic(err)
+	}
+	cli.SetWriteDelay(false)
+	const N = 100000
+	buf := make([]byte, 128)
+	msg := make([]byte, 128)
+
+	for i := 0; i < N; i++ {
+		io.ReadFull(rand.Reader, msg)
+		cli.Write([]byte(msg))
+		if n, err := io.ReadFull(cli, buf); err == nil {
+			if !bytes.Equal(buf[:n], msg) {
+				t.Fail()
+			}
+		} else {
+			panic(err)
+		}
+	}
+	cli.Close()
+}
+
+func TestControl(t *testing.T) {
+	port := int(atomic.AddUint32(&baseport, 1))
+	block, _ := NewSalsa20BlockCrypt(pass)
+	l, err := ListenWithOptions(fmt.Sprintf("127.0.0.1:%v", port), block, 10, 1)
+	if err != nil {
+		panic(err)
+	}
+
+	errorA := errors.New("A")
+	err = l.Control(func(conn net.PacketConn) error {
+		fmt.Printf("Listener Control: conn: %v\n", conn)
+		return errorA
+	})
+
+	if err != errorA {
+		t.Fatal(err)
+	}
+
+	cli, err := dialEcho(port)
+	if err != nil {
+		panic(err)
+	}
+
+	errorB := errors.New("B")
+	err = cli.Control(func(conn net.PacketConn) error {
+		fmt.Printf("Client Control: conn: %v\n", conn)
+		return errorB
+	})
+
+	if err != errorB {
+		t.Fatal(err)
+	}
+}
+
+func TestSessionReadAfterClosed(t *testing.T) {
+	us, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	uc, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	defer us.Close()
+	defer uc.Close()
+
+	knockDoor := func(c net.Conn, myid string) (string, error) {
+		c.SetDeadline(time.Now().Add(time.Second * 3))
+		_, err := c.Write([]byte(myid))
+		c.SetDeadline(time.Time{})
+		if err != nil {
+			return "", err
+		}
+		c.SetDeadline(time.Now().Add(time.Second * 3))
+		var buf [1024]byte
+		n, err := c.Read(buf[:])
+		c.SetDeadline(time.Time{})
+		return string(buf[:n]), err
+	}
+
+	check := func(c1, c2 *UDPSession) {
+		done := make(chan struct{}, 1)
+		go func() {
+			rid, err := knockDoor(c2, "4321")
+			done <- struct{}{}
+			if err != nil {
+				panic(err)
+			}
+			if rid != "1234" {
+				panic("mismatch id")
+			}
+		}()
+		rid, err := knockDoor(c1, "1234")
+		if err != nil {
+			panic(err)
+		}
+		if rid != "4321" {
+			panic("mismatch id")
+		}
+		<-done
+	}
+
+	c1, err := NewConn3(0, uc.LocalAddr(), nil, 0, 0, us)
+	if err != nil {
+		panic(err)
+	}
+	c2, err := NewConn3(0, us.LocalAddr(), nil, 0, 0, uc)
+	if err != nil {
+		panic(err)
+	}
+	check(c1, c2)
+	c1.Close()
+	c2.Close()
+	//log.Println("conv id 0 is closed")
+
+	c1, err = NewConn3(4321, uc.LocalAddr(), nil, 0, 0, us)
+	if err != nil {
+		panic(err)
+	}
+	c2, err = NewConn3(4321, us.LocalAddr(), nil, 0, 0, uc)
+	if err != nil {
+		panic(err)
+	}
+	check(c1, c2)
 }
